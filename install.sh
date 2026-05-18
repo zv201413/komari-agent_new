@@ -40,6 +40,7 @@ service_name="komari-agent"
 target_dir="/opt/komari"
 github_proxy=""
 install_version="" # New parameter for specifying version
+run_in_background=""  # Force nohup mode even if init system available
  
 
 # Detect OS
@@ -90,6 +91,10 @@ while [[ $# -gt 0 ]]; do
             install_version="$2"
             shift 2
             ;;
+        --run-in-background|--background)
+            run_in_background="true"
+            shift
+            ;;
         --install*)
             log_warning "Unknown install parameter: $1"
             shift
@@ -106,6 +111,8 @@ done
 komari_args="${komari_args# }"
 
 komari_agent_path="${target_dir}/agent"
+pid_file="/var/run/${service_name}.pid"
+nohup_log="${target_dir}/agent.log"
 
 # macOS doesn't always require sudo for everything
 if [ "$os_name" = "darwin" ] && command -v brew >/dev/null 2>&1; then
@@ -192,44 +199,45 @@ uninstall_previous
 install_dependencies() {
     log_step "Checking and installing dependencies..."
 
-    local deps="curl"
-    local missing_deps=""
-    for cmd in $deps; do
-        if ! command -v $cmd >/dev/null 2>&1; then
-            missing_deps="$missing_deps $cmd"
-        fi
-    done
+    # We need at least one download tool: curl or wget
+    local has_curl=false
+    local has_wget=false
+    command -v curl >/dev/null 2>&1 && has_curl=true
+    command -v wget >/dev/null 2>&1 && has_wget=true
 
-    if [ -n "$missing_deps" ]; then
-        # Check package manager and install dependencies
+    if [ "$has_curl" = false ] && [ "$has_wget" = false ]; then
+        # Try installing curl first (smaller, more common)
         if command -v apt >/dev/null 2>&1; then
-            log_info "Using apt to install dependencies..."
-            apt update
-            apt install -y $missing_deps
+            log_info "Using apt to install curl..."
+            apt update && apt install -y curl
         elif command -v yum >/dev/null 2>&1; then
-            log_info "Using yum to install dependencies..."
-            yum install -y $missing_deps
+            log_info "Using yum to install curl..."
+            yum install -y curl
         elif command -v apk >/dev/null 2>&1; then
-            log_info "Using apk to install dependencies..."
-            apk add $missing_deps
+            log_info "Using apk to install curl..."
+            apk add curl
         elif command -v brew >/dev/null 2>&1; then
-            log_info "Using Homebrew to install dependencies..."
-            brew install $missing_deps
+            log_info "Using Homebrew to install curl..."
+            brew install curl
         else
-            log_error "No supported package manager found (apt/yum/apk/brew)"
-            exit 1
-        fi
-        
-        # Verify installation
-        for cmd in $missing_deps; do
-            if ! command -v $cmd >/dev/null 2>&1; then
-                log_error "Failed to install $cmd"
+            # No package manager - try wget as last resort
+            if command -v wget >/dev/null 2>&1; then
+                log_info "Using wget (already available)"
+            else
+                log_error "No download tool found (curl or wget) and no package manager available"
                 exit 1
             fi
-        done
-        log_success "Dependencies installed successfully"
+        fi
+    fi
+
+    # Check that at least one download tool is now available
+    if command -v curl >/dev/null 2>&1; then
+        log_success "Download tool: curl"
+    elif command -v wget >/dev/null 2>&1; then
+        log_success "Download tool: wget"
     else
-        log_success "Dependencies already satisfied"
+        log_error "Neither curl nor wget is available"
+        exit 1
     fi
 }
 
@@ -306,7 +314,7 @@ fi
 log_step "Creating installation directory: ${GREEN}$target_dir${NC}"
 mkdir -p "$target_dir"
 
-# Download binary
+# Download binary (curl preferred, wget fallback)
 if [ -n "$github_proxy" ]; then
     log_step "Downloading $file_name via proxy..."
     log_info "URL: ${CYAN}$download_url${NC}"
@@ -314,8 +322,26 @@ else
     log_step "Downloading $file_name directly..."
     log_info "URL: ${CYAN}$download_url${NC}"
 fi
-if ! curl -L -o "$komari_agent_path" "$download_url"; then
-    log_error "Download failed"
+if command -v curl >/dev/null 2>&1; then
+    download_ok=false
+    if curl -L -o "$komari_agent_path" "$download_url"; then
+        download_ok=true
+    fi
+    if [ "$download_ok" = false ]; then
+        log_error "Download failed via curl"
+        exit 1
+    fi
+elif command -v wget >/dev/null 2>&1; then
+    download_ok=false
+    if wget -qO "$komari_agent_path" "$download_url"; then
+        download_ok=true
+    fi
+    if [ "$download_ok" = false ]; then
+        log_error "Download failed via wget"
+        exit 1
+    fi
+else
+    log_error "No download tool available (curl or wget)"
     exit 1
 fi
 
@@ -325,6 +351,76 @@ log_success "Komari-agent installed to ${GREEN}$komari_agent_path${NC}"
 
 # Detect init system and configure service
 log_step "Configuring system service..."
+
+# Create a background (nohup) service when no init system is available.
+# Writes PID to pid_file and starts the agent with nohup in the background.
+# Also creates a helper script for management (start/stop/status/restart).
+install_background_service() {
+    local launcher="${target_dir}/${service_name}.sh"
+    local manager="${target_dir}/agent.sh"
+
+    mkdir -p "$target_dir"
+
+    # Create launcher script that wraps the binary with nohup
+    cat > "$launcher" << LAUNCHER
+#!/bin/sh
+PID_FILE="${pid_file}"
+AGENT_BIN="${komari_agent_path}"
+ARGS="${komari_args}"
+LOG="${nohup_log}"
+
+case "\$1" in
+    start)
+        echo "Starting ${service_name}..."
+        nohup "\$AGENT_BIN" \$ARGS >> "\$LOG" 2>&1 &
+        echo \$! > "\$PID_FILE"
+        echo "Started (PID: \$(cat "\$PID_FILE"))"
+        ;;
+    stop)
+        if [ -f "\$PID_FILE" ]; then
+            PID=\$(cat "\$PID_FILE")
+            echo "Stopping ${service_name} (PID: \$PID)..."
+            kill "\$PID" 2>/dev/null
+            rm -f "\$PID_FILE"
+            echo "Stopped"
+        else
+            echo "PID file not found. Trying pkill..."
+            pkill -f "\$AGENT_BIN" 2>/dev/null || echo "Not running"
+        fi
+        ;;
+    status)
+        if [ -f "\$PID_FILE" ] && kill -0 \$(cat "\$PID_FILE") 2>/dev/null; then
+            echo "${service_name} is running (PID: \$(cat "\$PID_FILE"))"
+        else
+            echo "${service_name} is not running"
+        fi
+        ;;
+    restart)
+        \$0 stop
+        sleep 1
+        \$0 start
+        ;;
+    logs)
+        tail -f "\$LOG"
+        ;;
+    *)
+        echo "Usage: \$0 {start|stop|status|restart|logs}"
+        ;;
+esac
+LAUNCHER
+    chmod +x "$launcher"
+
+    # Also create a symlink-friendly manager in target_dir
+    cat > "$manager" << MANAGER
+#!/bin/sh
+exec ${launcher} "\$@"
+MANAGER
+    chmod +x "$manager"
+
+    # Start the service
+    "$launcher" start
+    return $?
+}
 
 # Function to detect actual init system
 detect_init_system() {
@@ -639,9 +735,18 @@ EOF
     initctl start ${service_name}
     log_success "Upstart service configured and started"
 else
-    log_error "Unsupported or unknown init system detected: $init_system"
-    log_error "Supported init systems: systemd, openrc, procd, launchd"
-    exit 1
+    # Unknown/no init system → background (nohup) fallback
+    # This handles Docker containers, PaaS platforms, and other
+    # restricted environments where systemd/openrc are unavailable.
+    log_warning "No supported init system detected ($init_system)."
+    log_info "Falling back to background process (nohup) mode."
+
+    # If nohup is available, use it; otherwise run directly with &
+    if ! install_background_service; then
+        log_error "Failed to start background service"
+        exit 1
+    fi
+    log_success "Background service started (PID: $(cat "$pid_file" 2>/dev/null || echo "unknown"))"
 fi
 
 echo ""
@@ -650,6 +755,17 @@ if [ -f /etc/NIXOS ]; then
     log_success "Komari-agent binary installed!"
     log_warning "NixOS requires declarative service configuration."
     log_info "Please add the service configuration to your NixOS config and rebuild."
+elif [ "$init_system" = "unknown" ] || [ -n "$run_in_background" ]; then
+    log_success "Komari-agent installation completed! (background mode)"
+    echo ""
+    log_info "Management commands:"
+    log_info "  Start:   ${GREEN}${target_dir}/agent.sh start${NC}"
+    log_info "  Stop:    ${GREEN}${target_dir}/agent.sh stop${NC}"
+    log_info "  Status:  ${GREEN}${target_dir}/agent.sh status${NC}"
+    log_info "  Logs:    ${GREEN}${target_dir}/agent.sh logs${NC}"
+    echo ""
+    log_info "Or use the launcher directly:"
+    log_info "  ${GREEN}${target_dir}/${service_name}.sh {start|stop|status|restart|logs}${NC}"
 else
     log_success "Komari-agent installation completed!"
 fi
