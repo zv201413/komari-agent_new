@@ -8,3 +8,7 @@ build/
 auto-discovery.json
 net_static.json
 config.json
+_Archive/
+manifest.yaml
+Project_Summary.md
+Archive_Log.md
