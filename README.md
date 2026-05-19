@@ -19,6 +19,17 @@ Cgroup 感知的 Go 探针客户端，优化了在受限容器环境下的 CPU �
 
 ## 🚀 快速开始
 
+### 使用安装脚本（推荐）
+
+```bash
+curl -fsSL https://github.com/zv201413/komari-agent_new/releases/latest/download/install.sh \
+  | bash -s -- -e https://your-server.com:25774 -t your_agent_secret
+```
+
+> 支持 root 和非 root 环境：root 下安装到 `/opt/komari` + systemd 服务；非 root 下自动用 `~/.komari` + nohup 后台模式。
+
+### 手动编译运行
+
 1. 编译: go build
 2. 运行: ./komari-agent -s http://server_addr:port -k agent_key
 
