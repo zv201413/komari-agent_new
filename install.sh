@@ -110,22 +110,28 @@ done
 # Remove leading space from komari_args if present
 komari_args="${komari_args# }"
 
-komari_agent_path="${target_dir}/agent"
-pid_file="/var/run/${service_name}.pid"
-nohup_log="${target_dir}/agent.log"
-
-# macOS doesn't always require sudo for everything
-if [ "$os_name" = "darwin" ] && command -v brew >/dev/null 2>&1; then
-    # On macOS with Homebrew, we can run without root for dependencies
+# Determine target directory, PID file, and root dependency requirement based on privileges
+if [ "$EUID" -ne 0 ]; then
+    # Fallback to home folder if target or parent directory is not writable
+    parent_dir=$(dirname "$target_dir" 2>/dev/null || echo "/opt")
+    if [ ! -w "$parent_dir" ] && [ ! -w "$target_dir" 2>/dev/null ]; then
+        target_dir="$HOME/.komari"
+        log_info "No write permission to target parent directory, falling back to user directory: $target_dir"
+    fi
+    pid_file="${target_dir}/${service_name}.pid"
     require_root_for_deps=false
+    log_info "Running as non-root user. Skipping root privilege validation."
 else
-    require_root_for_deps=true
+    pid_file="/var/run/${service_name}.pid"
+    if [ "$os_name" = "darwin" ] && command -v brew >/dev/null 2>&1; then
+        require_root_for_deps=false
+    else
+        require_root_for_deps=true
+    fi
 fi
 
-if [ "$EUID" -ne 0 ] && [ "$require_root_for_deps" = true ]; then
-    log_error "Please run as root"
-    exit 1
-fi
+komari_agent_path="${target_dir}/agent"
+nohup_log="${target_dir}/agent.log"
 
 echo -e "${WHITE}===========================================${NC}"
 echo -e "${WHITE}    Komari Agent Installation Script     ${NC}"
@@ -206,6 +212,10 @@ install_dependencies() {
     command -v wget >/dev/null 2>&1 && has_wget=true
 
     if [ "$has_curl" = false ] && [ "$has_wget" = false ]; then
+        if [ "$EUID" -ne 0 ]; then
+            log_error "No download tool found (curl or wget) and cannot install dependencies without root privileges."
+            exit 1
+        fi
         # Try installing curl first (smaller, more common)
         if command -v apt >/dev/null 2>&1; then
             log_info "Using apt to install curl..."
@@ -512,7 +522,12 @@ detect_init_system() {
 }
 
 init_system=$(detect_init_system)
-log_info "Detected init system: ${GREEN}$init_system${NC}"
+if [ "$EUID" -ne 0 ] && [ "$os_name" != "darwin" ]; then
+    init_system="unknown"
+    log_info "Running as non-root user. Forcing background mode (init system: unknown)"
+else
+    log_info "Detected init system: ${GREEN}$init_system${NC}"
+fi
 
 # Handle each init system
 if [ "$init_system" = "nixos" ]; then
