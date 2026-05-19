@@ -2,6 +2,7 @@ package monitoring
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -266,4 +267,12 @@ func InterfaceList() ([]string, error) {
 		}
 	}
 	return interfaces, nil
+}
+
+func TCPCc() string {
+	data, err := os.ReadFile("/proc/sys/net/ipv4/tcp_congestion_control")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }

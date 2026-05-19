@@ -56,6 +56,7 @@ func uploadBasicInfo() error {
 		"gpu_name":       monitoring.GpuName(),
 		"virtualization": monitoring.Virtualized(),
 		"version":        update.CurrentVersion,
+		"tcp_cc":         monitoring.TCPCc(),
 	}
 
 	// 尝试上传完整数据
