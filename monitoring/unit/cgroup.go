@@ -137,13 +137,13 @@ func cgroupCPUQuota() float64 {
 // Preserves fractional cores (e.g. 0.5, 3.1) instead of rounding up.
 // Returns the raw quota/period value rounded to 1 decimal place when cgroup
 // limits fewer cores than the host reports.
-func CgroupAwareCPUCores(physicalCores int) float64 {
+func CgroupAwareCPUCores(physicalCores float64) float64 {
 	cgCores := cgroupCPUQuota()
-	if cgCores > 0 && cgCores < float64(physicalCores) {
+	if cgCores > 0 && cgCores < physicalCores {
 		// Round to 1 decimal place: 0.5 → 0.5, 3.14 → 3.1, 2.0 → 2.0
 		return math.Round(cgCores*10) / 10
 	}
-	return float64(physicalCores)
+	return physicalCores
 }
 
 // CgroupAwareMemTotal returns the effective memory total, preferring cgroup limit
