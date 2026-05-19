@@ -188,26 +188,50 @@ func Ram() RamInfo {
 		if err != nil {
 			return RamInfo{}
 		}
-		return RamInfo{
+		result := RamInfo{
 			Total: v.Total,
 			Used:  v.Total - v.Free,
 			Mode:  "includeCache",
 		}
+		applyCgroupMemoryLimit(&result)
+		return result
 	}
 
 	if pkg_flags.GlobalConfig.MemoryReportRawUsed {
-		return GetMemHtopLike()
+		result := GetMemHtopLike()
+		applyCgroupMemoryLimit(&result)
+		return result
 	}
 
 	if runtime.GOOS == "linux" {
 		h := GetMemHtopLike()
 		if h.Total > 0 {
+			applyCgroupMemoryLimit(&h)
 			return h
 		}
 	}
 
 	// Default fallback
-	return GetMemGopsutil()
+	result := GetMemGopsutil()
+	applyCgroupMemoryLimit(&result)
+	return result
+}
+
+// applyCgroupMemoryLimit adjusts RamInfo.Total (and Used proportionally) if a cgroup
+// memory limit is detected that is smaller than the reported total.
+func applyCgroupMemoryLimit(r *RamInfo) {
+	if r.Total == 0 {
+		return
+	}
+	cgTotal := CgroupAwareMemTotal(r.Total)
+	if cgTotal < r.Total {
+		// Cap Used to the cgroup limit, preserving proportional usage.
+		if r.Used > cgTotal {
+			r.Used = cgTotal
+		}
+		r.Total = cgTotal
+		r.Mode = r.Mode + "+cgroup"
+	}
 }
 
 func Swap() RamInfo {

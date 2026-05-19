@@ -51,6 +51,10 @@ func Cpu() CpuInfo {
 		cpuinfo.CPUCores = cores
 	}
 
+	// Apply cgroup CPU quota correction for container environments.
+	// If cgroup limits fewer cores than /proc/cpuinfo reports, use the cgroup value.
+	cpuinfo.CPUCores = CgroupAwareCPUCores(cpuinfo.CPUCores)
+
 	percentages, err := cpu.Percent(1*time.Second, false)
 	if err == nil && len(percentages) > 0 {
 		cpuinfo.CPUUsage = percentages[0]
