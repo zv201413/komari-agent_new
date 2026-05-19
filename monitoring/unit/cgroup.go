@@ -1,6 +1,7 @@
 package monitoring
 
 import (
+	"log"
 	"math"
 	"os"
 	"runtime"
@@ -25,6 +26,8 @@ func cgroupMemoryLimit() uint64 {
 				limitBytes = val
 			}
 		}
+	} else {
+		log.Printf("[cgroup] cannot read /sys/fs/cgroup/memory.max: %v", err)
 	}
 
 	// Fallback to cgroup v1: /sys/fs/cgroup/memory/memory.limit_in_bytes
@@ -34,6 +37,8 @@ func cgroupMemoryLimit() uint64 {
 			if val, err := strconv.ParseUint(s, 10, 64); err == nil {
 				limitBytes = val
 			}
+		} else {
+			log.Printf("[cgroup] cannot read /sys/fs/cgroup/memory/memory.limit_in_bytes: %v", err)
 		}
 	}
 
@@ -50,6 +55,32 @@ func cgroupMemoryLimit() uint64 {
 	}
 
 	return limitBytes
+}
+
+// cgroupMemoryUsage reads the actual cgroup memory usage (not from /proc/meminfo).
+// Returns 0 if not in a cgroup-limited environment or on error.
+func cgroupMemoryUsage() uint64 {
+	if runtime.GOOS != "linux" {
+		return 0
+	}
+
+	// Try cgroup v2 first: /sys/fs/cgroup/memory.current
+	if data, err := os.ReadFile("/sys/fs/cgroup/memory.current"); err == nil {
+		s := strings.TrimSpace(string(data))
+		if val, err := strconv.ParseUint(s, 10, 64); err == nil && val > 0 {
+			return val
+		}
+	}
+
+	// Fallback to cgroup v1: /sys/fs/cgroup/memory/memory.usage_in_bytes
+	if data, err := os.ReadFile("/sys/fs/cgroup/memory/memory.usage_in_bytes"); err == nil {
+		s := strings.TrimSpace(string(data))
+		if val, err := strconv.ParseUint(s, 10, 64); err == nil && val > 0 {
+			return val
+		}
+	}
+
+	return 0
 }
 
 // cgroupCPUQuota reads the cgroup CPU quota and returns the effective core count.
@@ -73,6 +104,8 @@ func cgroupCPUQuota() float64 {
 				}
 			}
 		}
+	} else {
+		log.Printf("[cgroup] cannot read /sys/fs/cgroup/cpu.max: %v", err)
 	}
 
 	// Fallback to cgroup v1
@@ -88,19 +121,29 @@ func cgroupCPUQuota() float64 {
 				return cores
 			}
 		}
+	} else {
+		if errQ != nil {
+			log.Printf("[cgroup] cannot read /sys/fs/cgroup/cpu/cpu.cfs_quota_us: %v", errQ)
+		}
+		if errP != nil {
+			log.Printf("[cgroup] cannot read /sys/fs/cgroup/cpu/cpu.cfs_period_us: %v", errP)
+		}
 	}
 
 	return 0
 }
 
-// CgroupAwareCPUCores returns the effective CPU core count, preferring cgroup quota
-// over the physical/logical count when the quota is smaller.
-func CgroupAwareCPUCores(physicalCores int) int {
+// CgroupAwareCPUCores returns the effective CPU core count as float64.
+// Preserves fractional cores (e.g. 0.5, 3.1) instead of rounding up.
+// Returns the raw quota/period value rounded to 1 decimal place when cgroup
+// limits fewer cores than the host reports.
+func CgroupAwareCPUCores(physicalCores int) float64 {
 	cgCores := cgroupCPUQuota()
 	if cgCores > 0 && cgCores < float64(physicalCores) {
-		return int(math.Ceil(cgCores))
+		// Round to 1 decimal place: 0.5 → 0.5, 3.14 → 3.1, 2.0 → 2.0
+		return math.Round(cgCores*10) / 10
 	}
-	return physicalCores
+	return float64(physicalCores)
 }
 
 // CgroupAwareMemTotal returns the effective memory total, preferring cgroup limit
@@ -111,4 +154,10 @@ func CgroupAwareMemTotal(procMemTotal uint64) uint64 {
 		return cgLimit
 	}
 	return procMemTotal
+}
+
+// CgroupMemUsed returns the actual cgroup memory usage.
+// Returns 0 if not available (caller should fall back to /proc/meminfo).
+func CgroupMemUsed() uint64 {
+	return cgroupMemoryUsage()
 }

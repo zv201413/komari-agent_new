@@ -217,19 +217,34 @@ func Ram() RamInfo {
 	return result
 }
 
-// applyCgroupMemoryLimit adjusts RamInfo.Total (and Used proportionally) if a cgroup
-// memory limit is detected that is smaller than the reported total.
+// applyCgroupMemoryLimit adjusts RamInfo if a cgroup memory limit is detected.
+// It replaces Total with the cgroup limit, and Used with the actual cgroup memory usage
+// (from memory.current/memory.usage_in_bytes), falling back to capping if cgroup usage
+// is unavailable.
 func applyCgroupMemoryLimit(r *RamInfo) {
 	if r.Total == 0 {
 		return
 	}
 	cgTotal := CgroupAwareMemTotal(r.Total)
 	if cgTotal < r.Total {
-		// Cap Used to the cgroup limit, preserving proportional usage.
-		if r.Used > cgTotal {
-			r.Used = cgTotal
-		}
 		r.Total = cgTotal
+
+		// Try to read actual cgroup memory usage instead of using /proc/meminfo values
+		cgUsed := CgroupMemUsed()
+		if cgUsed > 0 {
+			// cgroup memory.current includes cache; for consistency, use it directly.
+			// Cap to total in case of transient overshoot.
+			if cgUsed > cgTotal {
+				cgUsed = cgTotal
+			}
+			r.Used = cgUsed
+		} else {
+			// Fallback: cap the /proc/meminfo used value to cgroup total
+			if r.Used > cgTotal {
+				r.Used = cgTotal
+			}
+		}
+
 		r.Mode = r.Mode + "+cgroup"
 	}
 }

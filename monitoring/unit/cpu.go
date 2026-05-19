@@ -16,7 +16,7 @@ var flags = pkg_flags.GlobalConfig
 type CpuInfo struct {
 	CPUName         string  `json:"cpu_name"`
 	CPUArchitecture string  `json:"cpu_architecture"`
-	CPUCores        int     `json:"cpu_cores"`
+	CPUCores        float64 `json:"cpu_cores"`
 	CPUUsage        float64 `json:"cpu_usage"`
 }
 
@@ -48,7 +48,7 @@ func Cpu() CpuInfo {
 
 	cores, err := cpu.Counts(true)
 	if err == nil {
-		cpuinfo.CPUCores = cores
+		cpuinfo.CPUCores = float64(cores)
 	}
 
 	// Apply cgroup CPU quota correction for container environments.
