@@ -18,6 +18,20 @@ import (
 
 var flags = pkg_flags.GlobalConfig
 
+func init() {
+	monitoring.OnNatDetected = func(natType string) {
+		log.Println("NAT type detected, re-uploading basic info...")
+		go func() {
+			err := uploadBasicInfo()
+			if err != nil {
+				log.Println("Error uploading basic info after NAT detection:", err)
+			} else {
+				log.Println("Basic info with detected NAT type uploaded successfully")
+			}
+		}()
+	}
+}
+
 func DoUploadBasicInfoWorks() {
 	ticker := time.NewTicker(time.Duration(flags.InfoReportInterval) * time.Minute)
 	for range ticker.C {
@@ -39,6 +53,11 @@ func uploadBasicInfo() error {
 	cpu := monitoring.Cpu()
 
 	osname := monitoring.OSName()
+	natType := monitoring.GetNatType()
+	if natType != "" && natType != "检测中 (Detecting...)" {
+		osname = fmt.Sprintf("%s (%s)", osname, natType)
+	}
+
 	kernelVersion := monitoring.KernelVersion()
 	ipv4, ipv6, _ := monitoring.GetIPAddress()
 
