@@ -140,8 +140,8 @@ func cgroupCPUQuota() float64 {
 func CgroupAwareCPUCores(physicalCores float64) float64 {
 	cgCores := cgroupCPUQuota()
 	if cgCores > 0 && cgCores < physicalCores {
-		// Round to 1 decimal place: 0.5 → 0.5, 3.14 → 3.1, 2.0 → 2.0
-		return math.Round(cgCores*10) / 10
+		// Round to 2 decimal places: 0.25 → 0.25, 0.5 → 0.5
+		return math.Round(cgCores*100) / 100
 	}
 	return physicalCores
 }
