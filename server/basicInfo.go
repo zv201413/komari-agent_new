@@ -20,6 +20,9 @@ var flags = pkg_flags.GlobalConfig
 
 func init() {
 	monitoring.OnNatDetected = func(natType string) {
+		if !flags.CheckNatType {
+			return
+		}
 		log.Println("NAT type detected, re-uploading basic info...")
 		go func() {
 			err := uploadBasicInfo()
@@ -53,9 +56,11 @@ func uploadBasicInfo() error {
 	cpu := monitoring.Cpu()
 
 	osname := monitoring.OSName()
-	natType := monitoring.GetNatType()
-	if natType != "" && natType != "检测中 (Detecting...)" {
-		osname = fmt.Sprintf("%s (%s)", osname, natType)
+	if flags.CheckNatType {
+		natType := monitoring.GetNatType()
+		if natType != "" && natType != "检测中 (Detecting...)" {
+			osname = fmt.Sprintf("%s (%s)", osname, natType)
+		}
 	}
 
 	kernelVersion := monitoring.KernelVersion()
