@@ -62,6 +62,7 @@ func EstablishWebSocketConnection() {
 					conn, err = connectWebSocket(websocketEndpoint)
 					if err == nil {
 						log.Println("WebSocket connected")
+						go UpdateBasicInfo() // 确保在网络就绪且成功连上 WS 时上报一次基础信息
 						go handleWebSocketMessages(conn, make(chan struct{}))
 						break
 					} else {
