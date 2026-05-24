@@ -16,7 +16,6 @@ var (
 	OnNatDetected func(string)
 )
 
-// GetNatType returns the cached NAT type, triggering detection on first call
 func GetNatType() string {
 	natTypeOnce.Do(func() {
 		go detectNatType()
@@ -45,22 +44,33 @@ func getLocalIP() string {
 	return localAddr.IP.String()
 }
 
+var stunServers = []string{
+	"stun.cloudflare.com:443",
+	"stun.l.google.com:19302",
+	"stun1.l.google.com:19302",
+	"stun.cloudflare.com:3478",
+	"stun.voipbuster.com:3478",
+}
+
 func runNatDetection() string {
 	lip := getLocalIP()
 	if lip == "" {
 		return "未知 (无法获取本地 IP)"
 	}
 
-	serverA := "stun.l.google.com:19302"
-	serverB := "stun1.l.google.com:19302"
-
-	addrA, err := net.ResolveUDPAddr("udp", serverA)
-	if err != nil {
-		return "未知 (DNS 解析失败)"
+	if !dnsProbe() {
+		return "UDP 阻断 (UDP Blocked)"
 	}
-	addrB, err := net.ResolveUDPAddr("udp", serverB)
-	if err != nil {
-		addrB = addrA
+
+	var resolved []*net.UDPAddr
+	for _, s := range stunServers {
+		addr, err := net.ResolveUDPAddr("udp", s)
+		if err == nil {
+			resolved = append(resolved, addr)
+		}
+	}
+	if len(resolved) == 0 {
+		return "STUN 受限 (DNS 解析失败)"
 	}
 
 	laddr, err := net.ResolveUDPAddr("udp", "0.0.0.0:0")
@@ -75,10 +85,9 @@ func runNatDetection() string {
 
 	lport := conn.LocalAddr().(*net.UDPAddr).Port
 
-	// Test 1: Send Binding Request to Server A
-	m1, err := stunReq(conn, addrA, false, false)
+	m1, m1Addr, err := stunReq(conn, resolved)
 	if err != nil {
-		return "UDP 屏蔽 (Blocked)"
+		return "STUN 受限 (STUN Blocked)"
 	}
 
 	eip := m1.IP.String()
@@ -88,73 +97,122 @@ func runNatDetection() string {
 		return "公网 IP (No NAT)"
 	}
 
-	// Test 2: Send Binding Request to Server A with Change IP & Port flags
-	mc, err := stunReq(conn, addrA, true, true)
-	if err == nil && mc != nil {
-		return "全锥型 (Full Cone)"
-	}
-
-	// Test 3: Send Binding Request to Server B
-	m2, err := stunReq(conn, addrB, false, false)
+	m2, err := stunReqDiff(conn, resolved, m1Addr)
 	if err != nil {
-		return "未知 (限制型，Server B 无响应)"
+		return "锥型 NAT (Cone NAT)"
 	}
 
 	if eip != m2.IP.String() || eport != m2.Port {
 		return "对称型 (Symmetric NAT)"
 	}
 
-	// Test 4: Send Binding Request to Server A with Change Port flag
-	mcp, err := stunReq(conn, addrA, false, true)
-	if err == nil && mcp != nil {
-		return "地址限制型 (Restricted Cone)"
-	}
-
-	return "端口限制型 (Port Restricted Cone)"
+	return "锥型 NAT (Cone NAT)"
 }
 
-func stunReq(conn *net.UDPConn, serverAddr *net.UDPAddr, changeIP, changePort bool) (*net.UDPAddr, error) {
-	var attrs []byte
-	if changeIP || changePort {
-		var f uint32
-		if changeIP {
-			f |= 0x04
-		}
-		if changePort {
-			f |= 0x02
-		}
-		attrHeader := make([]byte, 8)
-		binary.BigEndian.PutUint16(attrHeader[0:2], 0x0003) // CHANGE-REQUEST
-		binary.BigEndian.PutUint16(attrHeader[2:4], 4)      // Length 4
-		binary.BigEndian.PutUint32(attrHeader[4:8], f)
-		attrs = attrHeader
+func dnsProbe() bool {
+	conn, err := net.DialUDP("udp", nil, &net.UDPAddr{
+		IP:   net.IPv4(8, 8, 8, 8),
+		Port: 53,
+	})
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+
+	pkt := []byte{
+		0x00, 0x01,
+		0x01, 0x00,
+		0x00, 0x01,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x06, 'g', 'o', 'o', 'g', 'l', 'e',
+		0x03, 'c', 'o', 'm',
+		0x00,
+		0x00, 0x01,
+		0x00, 0x01,
 	}
 
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	_, err = conn.Write(pkt)
+	if err != nil {
+		return false
+	}
+
+	buf := make([]byte, 512)
+	_, err = conn.Read(buf)
+	return err == nil
+}
+
+func stunReq(conn *net.UDPConn, addrs []*net.UDPAddr) (*net.UDPAddr, *net.UDPAddr, error) {
 	tid := make([]byte, 12)
 	_, _ = rand.Read(tid)
 
-	pkt := make([]byte, 20+len(attrs))
-	binary.BigEndian.PutUint16(pkt[0:2], 0x0001) // Binding Request
-	binary.BigEndian.PutUint16(pkt[2:4], uint16(len(attrs)))
-	binary.BigEndian.PutUint32(pkt[4:8], 0x2112A442) // Magic Cookie
+	pkt := make([]byte, 20)
+	binary.BigEndian.PutUint16(pkt[0:2], 0x0001)
+	binary.BigEndian.PutUint16(pkt[2:4], 0)
+	binary.BigEndian.PutUint32(pkt[4:8], 0x2112A442)
 	copy(pkt[8:20], tid)
-	if len(attrs) > 0 {
-		copy(pkt[20:], attrs)
+
+	for _, addr := range addrs {
+		_, err := conn.WriteTo(pkt, addr)
+		if err != nil {
+			continue
+		}
+
+		buf := make([]byte, 4096)
+		_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		n, _, err := conn.ReadFrom(buf)
+		if err != nil {
+			continue
+		}
+
+		mapped, err := parseStunResponse(buf[:n], tid)
+		if err != nil {
+			continue
+		}
+		return mapped, addr, nil
 	}
 
-	_, err := conn.WriteTo(pkt, serverAddr)
-	if err != nil {
-		return nil, err
+	return nil, nil, fmt.Errorf("no STUN server responded")
+}
+
+func stunReqDiff(conn *net.UDPConn, addrs []*net.UDPAddr, exclude *net.UDPAddr) (*net.UDPAddr, error) {
+	tid := make([]byte, 12)
+	_, _ = rand.Read(tid)
+
+	pkt := make([]byte, 20)
+	binary.BigEndian.PutUint16(pkt[0:2], 0x0001)
+	binary.BigEndian.PutUint16(pkt[2:4], 0)
+	binary.BigEndian.PutUint32(pkt[4:8], 0x2112A442)
+	copy(pkt[8:20], tid)
+
+	for _, addr := range addrs {
+		if addr.IP.Equal(exclude.IP) {
+			continue
+		}
+		_, err := conn.WriteTo(pkt, addr)
+		if err != nil {
+			continue
+		}
+
+		buf := make([]byte, 4096)
+		_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		n, _, err := conn.ReadFrom(buf)
+		if err != nil {
+			continue
+		}
+
+		mapped, err := parseStunResponse(buf[:n], tid)
+		if err != nil {
+			continue
+		}
+		return mapped, nil
 	}
 
-	buf := make([]byte, 4096)
-	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
-	n, _, err := conn.ReadFrom(buf)
-	if err != nil {
-		return nil, err
-	}
+	return nil, fmt.Errorf("no different-IP STUN server responded")
+}
 
-	if n < 20 {
+func parseStunResponse(buf []byte, tid []byte) (*net.UDPAddr, error) {
+	if len(buf) < 20 {
 		return nil, fmt.Errorf("packet too short")
 	}
 
@@ -163,10 +221,18 @@ func stunReq(conn *net.UDPConn, serverAddr *net.UDPAddr, changeIP, changePort bo
 		return nil, fmt.Errorf("invalid magic cookie")
 	}
 
+	if len(buf) >= 20 {
+		for i := 0; i < 12; i++ {
+			if buf[8+i] != tid[i] {
+				return nil, fmt.Errorf("transaction ID mismatch")
+			}
+		}
+	}
+
 	msgLen := binary.BigEndian.Uint16(buf[2:4])
 	end := 20 + int(msgLen)
-	if end > n {
-		end = n
+	if end > len(buf) {
+		end = len(buf)
 	}
 
 	pos := 20
@@ -179,13 +245,11 @@ func stunReq(conn *net.UDPConn, serverAddr *net.UDPAddr, changeIP, changePort bo
 		}
 
 		attrVal := buf[pos : pos+al]
-		// Align to 4 bytes boundary
 		pos += (al + 3) &^ 3
 
-		// Type 0x0020: XOR-MAPPED-ADDRESS
 		if at == 0x0020 && al >= 8 {
 			family := attrVal[1]
-			if family == 0x01 { // IPv4
+			if family == 0x01 {
 				xport := binary.BigEndian.Uint16(attrVal[2:4])
 				port := xport ^ uint16(0x2112A442>>16)
 				xip := binary.BigEndian.Uint32(attrVal[4:8])
@@ -199,10 +263,9 @@ func stunReq(conn *net.UDPConn, serverAddr *net.UDPAddr, changeIP, changePort bo
 			}
 		}
 
-		// Type 0x0001: MAPPED-ADDRESS
 		if at == 0x0001 && al >= 8 {
 			family := attrVal[1]
-			if family == 0x01 { // IPv4
+			if family == 0x01 {
 				port := binary.BigEndian.Uint16(attrVal[2:4])
 				ip := net.IP(attrVal[4:8])
 				return &net.UDPAddr{
