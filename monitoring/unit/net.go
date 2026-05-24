@@ -271,8 +271,13 @@ func InterfaceList() ([]string, error) {
 
 func TCPCc() string {
 	data, err := os.ReadFile("/proc/sys/net/ipv4/tcp_congestion_control")
-	if err != nil {
-		return ""
+	if err == nil {
+		return strings.TrimSpace(string(data))
 	}
-	return strings.TrimSpace(string(data))
+	// fallback: sysctl for containers that mask procfs
+	out, err := exec.Command("sysctl", "-n", "net.ipv4.tcp_congestion_control").Output()
+	if err == nil {
+		return strings.TrimSpace(string(out))
+	}
+	return ""
 }
