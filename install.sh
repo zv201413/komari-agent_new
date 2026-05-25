@@ -193,10 +193,24 @@ uninstall_previous() {
     fi
 
     if command -v supervisorctl >/dev/null 2>&1; then
-        supervisorctl stop ${service_name} 2>/dev/null || true
-        supervisorctl remove ${service_name} 2>/dev/null || true
-        rm -f /etc/supervisor/conf.d/${service_name}.conf 2>/dev/null || true
-        rm -f /etc/supervisord.d/${service_name}.ini 2>/dev/null || true
+        SUPERVISOR_CONF=$(tr '\0' ' ' < /proc/1/cmdline 2>/dev/null | sed -n 's/.*-c \([^ ]*\).*/\1/p')
+        if [ -n "$SUPERVISOR_CONF" ] && [ -f "$SUPERVISOR_CONF" ]; then
+            supervisorctl -c "$SUPERVISOR_CONF" stop ${service_name} 2>/dev/null || true
+            supervisorctl -c "$SUPERVISOR_CONF" remove ${service_name} 2>/dev/null || true
+            
+            if grep -q '^\s*\[include\]' "$SUPERVISOR_CONF" 2>/dev/null; then
+                INCLUDE_FILES=$(sed -n 's/^\s*files\s*=\s*\(.*\)/\1/p' "$SUPERVISOR_CONF" | head -n 1)
+                INCLUDE_DIR=$(dirname "$INCLUDE_FILES" 2>/dev/null)
+                if [ -n "$INCLUDE_DIR" ] && [ "$INCLUDE_DIR" != "." ]; then
+                    rm -f "${INCLUDE_DIR}/${service_name}.conf" 2>/dev/null || true
+                fi
+            fi
+        else
+            supervisorctl stop ${service_name} 2>/dev/null || true
+            supervisorctl remove ${service_name} 2>/dev/null || true
+            rm -f /etc/supervisor/conf.d/${service_name}.conf 2>/dev/null || true
+            rm -f /etc/supervisord.d/${service_name}.ini 2>/dev/null || true
+        fi
     fi
     
 
@@ -764,13 +778,21 @@ else
     log_warning "No supported init system detected ($init_system)."
 
     if command -v supervisorctl >/dev/null 2>&1; then
-        conf_path="/etc/supervisor/conf.d/${service_name}.conf"
-        conf_dir=$(dirname "$conf_path")
-        if [ ! -d "$conf_dir" ] && [ -d "/etc/supervisord.d" ]; then
-            conf_path="/etc/supervisord.d/${service_name}.ini"
-        fi
+        # 提取 PID 1 supervisord 的配置路径
+        SUPERVISOR_CONF=$(tr '\0' ' ' < /proc/1/cmdline 2>/dev/null | sed -n 's/.*-c \([^ ]*\).*/\1/p')
 
-        cat > "$conf_path" << SUPERVISOR_EOF
+        if [ -n "$SUPERVISOR_CONF" ] && [ -f "$SUPERVISOR_CONF" ]; then
+            # 检测是否支持 [include]
+            if grep -q '^\s*\[include\]' "$SUPERVISOR_CONF" 2>/dev/null; then
+                # 提取 files = 后的路径
+                INCLUDE_FILES=$(sed -n 's/^\s*files\s*=\s*\(.*\)/\1/p' "$SUPERVISOR_CONF" | head -n 1)
+                INCLUDE_DIR=$(dirname "$INCLUDE_FILES" 2>/dev/null)
+                
+                if [ -n "$INCLUDE_DIR" ] && [ "$INCLUDE_DIR" != "." ]; then
+                    mkdir -p "$INCLUDE_DIR" 2>/dev/null
+                    conf_path="${INCLUDE_DIR}/${service_name}.conf"
+                    
+                    cat > "$conf_path" << SUPERVISOR_EOF
 [program:${service_name}]
 command=${komari_agent_path} ${komari_args}
 directory=${target_dir}
@@ -781,19 +803,61 @@ stdout_logfile=${target_dir}/agent.log
 stderr_logfile=${target_dir}/agent.log
 SUPERVISOR_EOF
 
-        if supervisorctl reread && supervisorctl update; then
-            supervisorctl start ${service_name}
-            log_success "Supervisord service configured and started"
-            echo ""
-            echo -e "${WHITE}===========================================${NC}"
-            log_success "Komari-agent installation completed! (supervisord mode)"
-            log_config "Service: ${GREEN}$service_name${NC}"
-            log_config "Arguments: ${GREEN}$komari_args${NC}"
-            echo -e "${WHITE}===========================================${NC}"
-            exit 0
+                    if supervisorctl -c "$SUPERVISOR_CONF" reread && supervisorctl -c "$SUPERVISOR_CONF" update; then
+                        supervisorctl -c "$SUPERVISOR_CONF" start ${service_name}
+                        log_success "Supervisord service configured and started via custom conf"
+                        echo ""
+                        echo -e "${WHITE}===========================================${NC}"
+                        log_success "Komari-agent installation completed! (supervisord mode)"
+                        log_config "Service: ${GREEN}$service_name${NC}"
+                        log_config "Arguments: ${GREEN}$komari_args${NC}"
+                        echo -e "${WHITE}===========================================${NC}"
+                        exit 0
+                    else
+                        log_warning "supervisorctl reread/update failed, falling back to nohup"
+                        rm -f "$conf_path"
+                    fi
+                else
+                    log_warning "Supervisord [include] found but failed to parse directory. Falling back to nohup."
+                fi
+            else
+                log_info "Supervisord config has no [include], skipping to avoid pollution."
+            fi
         else
-            log_warning "supervisorctl available but reread/update failed, falling back to nohup"
-            rm -f "$conf_path"
+            # 原始默认路径逻辑
+            conf_path="/etc/supervisor/conf.d/${service_name}.conf"
+            conf_dir=$(dirname "$conf_path")
+            if [ ! -d "$conf_dir" ] && [ -d "/etc/supervisord.d" ]; then
+                conf_path="/etc/supervisord.d/${service_name}.ini"
+            fi
+            
+            if [ -d "$(dirname "$conf_path")" ]; then
+                cat > "$conf_path" << SUPERVISOR_EOF
+[program:${service_name}]
+command=${komari_agent_path} ${komari_args}
+directory=${target_dir}
+autostart=true
+autorestart=true
+user=root
+stdout_logfile=${target_dir}/agent.log
+stderr_logfile=${target_dir}/agent.log
+SUPERVISOR_EOF
+
+                if supervisorctl reread && supervisorctl update; then
+                    supervisorctl start ${service_name}
+                    log_success "Supervisord service configured and started"
+                    echo ""
+                    echo -e "${WHITE}===========================================${NC}"
+                    log_success "Komari-agent installation completed! (supervisord mode)"
+                    log_config "Service: ${GREEN}$service_name${NC}"
+                    log_config "Arguments: ${GREEN}$komari_args${NC}"
+                    echo -e "${WHITE}===========================================${NC}"
+                    exit 0
+                else
+                    log_warning "supervisorctl reread/update failed, falling back to nohup"
+                    rm -f "$conf_path"
+                fi
+            fi
         fi
     fi
 
