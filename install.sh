@@ -205,8 +205,7 @@ uninstall_previous() {
             
 
             if grep -q '^\s*\[include\]' "$SUPERVISOR_CONF" 2>/dev/null; then
-                INCLUDE_FILES=$(sed -n 's/^\s*files\s*=\s*\(.*\)/\1/p' "$SUPERVISOR_CONF" | head -n 1)
-                INCLUDE_DIR=$(dirname "$INCLUDE_FILES" 2>/dev/null)
+                INCLUDE_DIR=$(sed -n 's/^\s*files\s*=\s*\(.*\)/\1/p' "$SUPERVISOR_CONF" | head -n 1 | awk '{print $1}' | xargs dirname 2>/dev/null)
                 if [ -n "$INCLUDE_DIR" ] && [ "$INCLUDE_DIR" != "." ]; then
                     rm -f "${INCLUDE_DIR}/${service_name}.conf" 2>/dev/null || true
                 fi
@@ -795,8 +794,7 @@ else
             # 检测是否支持 [include]
             if grep -q '^\s*\[include\]' "$SUPERVISOR_CONF" 2>/dev/null; then
                 # 提取 files = 后的路径
-                INCLUDE_FILES=$(sed -n 's/^\s*files\s*=\s*\(.*\)/\1/p' "$SUPERVISOR_CONF" | head -n 1)
-                INCLUDE_DIR=$(dirname "$INCLUDE_FILES" 2>/dev/null)
+                INCLUDE_DIR=$(sed -n 's/^\s*files\s*=\s*\(.*\)/\1/p' "$SUPERVISOR_CONF" | head -n 1 | awk '{print $1}' | xargs dirname 2>/dev/null)
                 
                 if [ -n "$INCLUDE_DIR" ] && [ "$INCLUDE_DIR" != "." ]; then
                     mkdir -p "$INCLUDE_DIR" 2>/dev/null
