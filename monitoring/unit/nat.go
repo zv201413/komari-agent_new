@@ -4,30 +4,68 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
-	"log"
 	"net"
 	"sync"
 	"time"
 )
 
 var (
-	natTypeOnce   sync.Once
+	natMu         sync.Mutex
 	cachedNat     = "检测中 (Detecting...)"
+	lastNatCheck  time.Time
+	isDetecting   bool
+	natExpiry     = 12 * time.Hour
 	OnNatDetected func(string)
 )
 
 func GetNatType() string {
-	natTypeOnce.Do(func() {
-		go detectNatType()
-	})
+	natMu.Lock()
+	defer natMu.Unlock()
+
+	if lastNatCheck.IsZero() || time.Since(lastNatCheck) > natExpiry {
+		if !isDetecting {
+			isDetecting = true
+			natMu.Unlock() // Unlock while blocking
+			
+			result := runNatDetection()
+			
+			natMu.Lock() // Relock to update
+			cachedNat = result
+			lastNatCheck = time.Now()
+			isDetecting = false
+			
+			if OnNatDetected != nil {
+				// Avoid holding lock during callback if it might block, though usually it's fast
+				go OnNatDetected(result)
+			}
+		}
+		return cachedNat
+	}
+
 	return cachedNat
 }
 
-func detectNatType() {
-	cachedNat = runNatDetection()
-	log.Printf("[NAT] 检测完成。结果: %s", cachedNat)
-	if OnNatDetected != nil {
-		OnNatDetected(cachedNat)
+func StartPeriodicNatDetection() {
+	ticker := time.NewTicker(natExpiry)
+	for range ticker.C {
+		natMu.Lock()
+		if !isDetecting {
+			isDetecting = true
+			natMu.Unlock()
+			go func() {
+				result := runNatDetection()
+				natMu.Lock()
+				cachedNat = result
+				lastNatCheck = time.Now()
+				isDetecting = false
+				if OnNatDetected != nil {
+					go OnNatDetected(result)
+				}
+				natMu.Unlock()
+			}()
+		} else {
+			natMu.Unlock()
+		}
 	}
 }
 

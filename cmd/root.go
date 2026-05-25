@@ -120,6 +120,9 @@ var RootCmd = &cobra.Command{
 			}
 			go update.DoUpdateWorks()
 		}
+		
+		go monitoring.StartPeriodicNatDetection()
+		
 		go server.DoUploadBasicInfoWorks()
 		for {
 			server.UpdateBasicInfo()

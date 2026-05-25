@@ -191,7 +191,15 @@ uninstall_previous() {
             rm -f "$user_plist"
         fi
     fi
+
+    if command -v supervisorctl >/dev/null 2>&1; then
+        supervisorctl stop ${service_name} 2>/dev/null || true
+        supervisorctl remove ${service_name} 2>/dev/null || true
+        rm -f /etc/supervisor/conf.d/${service_name}.conf 2>/dev/null || true
+        rm -f /etc/supervisord.d/${service_name}.ini 2>/dev/null || true
+    fi
     
+
     # Remove old binary if it exists
     if [ -f "$komari_agent_path" ]; then
         log_info "Removing old binary..."
@@ -754,6 +762,41 @@ else
     # This handles Docker containers, PaaS platforms, and other
     # restricted environments where systemd/openrc are unavailable.
     log_warning "No supported init system detected ($init_system)."
+
+    if command -v supervisorctl >/dev/null 2>&1; then
+        conf_path="/etc/supervisor/conf.d/${service_name}.conf"
+        conf_dir=$(dirname "$conf_path")
+        if [ ! -d "$conf_dir" ] && [ -d "/etc/supervisord.d" ]; then
+            conf_path="/etc/supervisord.d/${service_name}.ini"
+        fi
+
+        cat > "$conf_path" << SUPERVISOR_EOF
+[program:${service_name}]
+command=${komari_agent_path} ${komari_args}
+directory=${target_dir}
+autostart=true
+autorestart=true
+user=root
+stdout_logfile=${target_dir}/agent.log
+stderr_logfile=${target_dir}/agent.log
+SUPERVISOR_EOF
+
+        if supervisorctl reread && supervisorctl update; then
+            supervisorctl start ${service_name}
+            log_success "Supervisord service configured and started"
+            echo ""
+            echo -e "${WHITE}===========================================${NC}"
+            log_success "Komari-agent installation completed! (supervisord mode)"
+            log_config "Service: ${GREEN}$service_name${NC}"
+            log_config "Arguments: ${GREEN}$komari_args${NC}"
+            echo -e "${WHITE}===========================================${NC}"
+            exit 0
+        else
+            log_warning "supervisorctl available but reread/update failed, falling back to nohup"
+            rm -f "$conf_path"
+        fi
+    fi
+
     log_info "Falling back to background process (nohup) mode."
 
     # If nohup is available, use it; otherwise run directly with &
