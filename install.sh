@@ -193,11 +193,17 @@ uninstall_previous() {
     fi
 
     if command -v supervisorctl >/dev/null 2>&1; then
+        # 从 PID 1 提取 supervisord 配置路径
         SUPERVISOR_CONF=$(tr '\0' ' ' < /proc/1/cmdline 2>/dev/null | sed -n 's/.*-c \([^ ]*\).*/\1/p')
+        # PID 1 不是 supervisord 时，从进程列表搜索
+        if [ -z "$SUPERVISOR_CONF" ] || [ ! -f "$SUPERVISOR_CONF" ]; then
+            SUPERVISOR_CONF=$(ps aux 2>/dev/null | grep '[s]upervisord' | sed -n 's/.*-c \([^ ]*\).*/\1/p' | head -1)
+        fi
         if [ -n "$SUPERVISOR_CONF" ] && [ -f "$SUPERVISOR_CONF" ]; then
             supervisorctl -c "$SUPERVISOR_CONF" stop ${service_name} 2>/dev/null || true
             supervisorctl -c "$SUPERVISOR_CONF" remove ${service_name} 2>/dev/null || true
             
+
             if grep -q '^\s*\[include\]' "$SUPERVISOR_CONF" 2>/dev/null; then
                 INCLUDE_FILES=$(sed -n 's/^\s*files\s*=\s*\(.*\)/\1/p' "$SUPERVISOR_CONF" | head -n 1)
                 INCLUDE_DIR=$(dirname "$INCLUDE_FILES" 2>/dev/null)
@@ -780,6 +786,10 @@ else
     if command -v supervisorctl >/dev/null 2>&1; then
         # 提取 PID 1 supervisord 的配置路径
         SUPERVISOR_CONF=$(tr '\0' ' ' < /proc/1/cmdline 2>/dev/null | sed -n 's/.*-c \([^ ]*\).*/\1/p')
+        # PID 1 不是 supervisord 时，从进程列表搜索
+        if [ -z "$SUPERVISOR_CONF" ] || [ ! -f "$SUPERVISOR_CONF" ]; then
+            SUPERVISOR_CONF=$(ps aux 2>/dev/null | grep '[s]upervisord' | sed -n 's/.*-c \([^ ]*\).*/\1/p' | head -1)
+        fi
 
         if [ -n "$SUPERVISOR_CONF" ] && [ -f "$SUPERVISOR_CONF" ]; then
             # 检测是否支持 [include]
