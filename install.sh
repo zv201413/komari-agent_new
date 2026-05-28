@@ -403,7 +403,7 @@ case "\$1" in
             echo "Stopped"
         else
             echo "PID file not found. Trying pkill..."
-            pkill -f "\$AGENT_BIN" 2>/dev/null || echo "Not running"
+            pkill -f "\$AGENT_BIN" 2>/dev/null || killall "\$(basename "\$AGENT_BIN")" 2>/dev/null || echo "Not running"
         fi
         ;;
     status)
@@ -457,8 +457,13 @@ detect_init_system() {
         fi
     fi
     
-    # Get PID 1 process for other detection
-    local pid1_process=$(ps -p 1 -o comm= 2>/dev/null | tr -d ' ')
+    # Get PID 1 process for other detection (/proc/1/comm preferred, fallback to ps)
+    local pid1_process
+    if [ -f /proc/1/comm ]; then
+        pid1_process=$(cat /proc/1/comm | tr -d ' ')
+    else
+        pid1_process=$(ps -p 1 -o comm= 2>/dev/null | tr -d ' ')
+    fi
     
     # If PID 1 is systemd, use systemd
     if [ "$pid1_process" = "systemd" ] || [ -d /run/systemd/system ]; then
