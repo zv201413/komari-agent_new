@@ -193,8 +193,8 @@ uninstall_previous() {
     fi
 
     if command -v supervisorctl >/dev/null 2>&1; then
-        supervisorctl stop ${service_name} 2>/dev/null || true
-        supervisorctl remove ${service_name} 2>/dev/null || true
+        supervisorctl stop ${service_name} >/dev/null 2>&1 || true
+        supervisorctl remove ${service_name} >/dev/null 2>&1 || true
         rm -f /etc/supervisor/conf.d/${service_name}.conf 2>/dev/null || true
         rm -f /etc/supervisord.d/${service_name}.ini 2>/dev/null || true
     fi
@@ -268,7 +268,7 @@ install_dependencies
 # Architecture detection with platform-specific support
 arch=$(uname -m)
 case $arch in
-    x86_64)
+    x86_64|amd64)
         arch="amd64"
         ;;
     aarch64|arm64)
