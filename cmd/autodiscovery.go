@@ -131,14 +131,8 @@ func registerWithAutoDiscovery() error {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", flags.AutoDiscoveryKey))
 
-	// 添加Cloudflare Access头部
-	if flags.CFAccessClientID != "" && flags.CFAccessClientSecret != "" {
-		req.Header.Set("CF-Access-Client-Id", flags.CFAccessClientID)
-		req.Header.Set("CF-Access-Client-Secret", flags.CFAccessClientSecret)
-	}
-
 	// 发送请求
-	client := dnsresolver.GetHTTPClient(30 * time.Second)
+	client := dnsresolver.GetHTTPClientWithPreference(30*time.Second, flags.PreferIPVersion)
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to send register request: %v", err)

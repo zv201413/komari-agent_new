@@ -1,6 +1,9 @@
 package monitoring
 
 import (
+	"errors"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -19,6 +22,35 @@ func TestConnectionsCount(t *testing.T) {
 	}
 
 	t.Logf("TCP connections: %d, UDP connections: %d", tcpCount, udpCount)
+}
+
+func TestConnectionsCountCombinesProcAndFallbackErrors(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("proc net fast path only runs on linux")
+	}
+
+	fallbackErr := errors.New("fallback unavailable")
+	fallback := func() (int, int, error) {
+		return 0, 0, fallbackErr
+	}
+
+	tcpCount, udpCount, err := connectionsCountWithProcFallback(t.TempDir(), fallback)
+	if err == nil {
+		t.Fatal("expected combined error, got nil")
+	}
+	if tcpCount != 0 || udpCount != 0 {
+		t.Fatalf("expected zero counts on failure, got tcp=%d udp=%d", tcpCount, udpCount)
+	}
+	if !errors.Is(err, fallbackErr) {
+		t.Fatalf("expected combined error to wrap fallback error, got %v", err)
+	}
+
+	errText := err.Error()
+	for _, want := range []string{"proc net fast path failed", "no proc net files found", "gopsutil fallback failed"} {
+		if !strings.Contains(errText, want) {
+			t.Fatalf("expected error %q to contain %q", errText, want)
+		}
+	}
 }
 
 func TestParseNics(t *testing.T) {
@@ -160,6 +192,15 @@ func TestShouldInclude(t *testing.T) {
 			},
 			excludeNics: nil,
 			expected:    false,
+		},
+		{
+			name:        "interface with wildcard pattern in exclude list",
+			nicName:     "tun0",
+			includeNics: nil,
+			excludeNics: map[string]struct{}{
+				"tun*": {},
+			},
+			expected: false,
 		},
 	}
 

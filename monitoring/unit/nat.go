@@ -26,14 +26,14 @@ func GetNatType() string {
 		if !isDetecting {
 			isDetecting = true
 			natMu.Unlock() // Unlock while blocking
-			
+
 			result := runNatDetection()
-			
+
 			natMu.Lock() // Relock to update
 			cachedNat = result
 			lastNatCheck = time.Now()
 			isDetecting = false
-			
+
 			if OnNatDetected != nil {
 				// Avoid holding lock during callback if it might block, though usually it's fast
 				go OnNatDetected(result)

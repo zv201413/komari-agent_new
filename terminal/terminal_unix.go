@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -67,11 +66,7 @@ func newTerminalImpl() (*terminalImpl, error) {
 		return nil, fmt.Errorf("no supported shell found among %v", defaultShells)
 	}
 
-	shellArgv0 := filepath.Base(shell)
-	shellCmd := "for f in /etc/update-motd.d/*; do [ -x \"$f\" ] && \"$f\"; done; [ -r /etc/motd ] && cat /etc/motd; exec \"$0\""
-
-	cmd := exec.Command(shell, "-c", shellCmd)
-	cmd.Args[0] = shellArgv0
+	cmd := buildMotdShellCommand(shell)
 	cmd.Env = append(os.Environ(), // 继承系统环境变量
 		"TERM=xterm-256color", // 设置终端类型，提高兼容性
 		"LANG=C.UTF-8",        // 设置语言环境为 UTF-8
@@ -103,6 +98,12 @@ func newTerminalImpl() (*terminalImpl, error) {
 			cmd: cmd,
 		},
 	}, nil
+}
+
+const motdShellPrelude = "for f in /etc/update-motd.d/*; do [ -e \"$f\" ] && [ -x \"$f\" ] && \"$f\"; done; [ -r /etc/motd ] && cat /etc/motd; exec \"$1\""
+
+func buildMotdShellCommand(shell string) *exec.Cmd {
+	return exec.Command("/bin/sh", "-c", motdShellPrelude, "komari-motd", shell)
 }
 
 // unixTerminal 实现了 Unix 系统下的终端接口。
