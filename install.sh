@@ -39,6 +39,8 @@ log_config() {
 service_name="komari-agent"
 target_dir="/opt/komari"
 github_proxy=""
+install_dns64="2a00:1098:2c::1"
+agent_custom_dns_seen=false
 install_version="" # New parameter for specifying version
 run_in_background=""  # Force nohup mode even if init system available
 install_dir_specified=false
@@ -78,6 +80,15 @@ esac
 komari_args=""
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --install-dns64)
+            install_dns64="$2"
+            shift 2
+            ;;
+        --custom-dns)
+            agent_custom_dns_seen=true
+            komari_args="$komari_args --custom-dns $2"
+            shift 2
+            ;;
         --install-dir)
             target_dir="$2"
             install_dir_specified=true
@@ -110,6 +121,14 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+case "$install_dns64" in
+    off|0|false) install_dns64="" ;;
+    *[!0-9a-fA-F:.]*) log_error "--install-dns64 expects a DNS server IP or off"; exit 1 ;;
+esac
+if [ -n "$install_dns64" ] && [ "$agent_custom_dns_seen" = false ]; then
+    komari_args="$komari_args --custom-dns $install_dns64"
+fi
 
 # Remove leading space from komari_args if present
 komari_args="${komari_args# }"
@@ -159,6 +178,7 @@ log_config "  Service name: ${GREEN}$service_name${NC}"
 log_config "  Service user: ${GREEN}$service_user${NC}"
 log_config "  Install directory: ${GREEN}$target_dir${NC}"
 log_config "  GitHub proxy: ${GREEN}${github_proxy:-"(direct)"}${NC}"
+log_config "  DNS64/NAT64: ${GREEN}${install_dns64:-"(disabled)"}${NC} (nat64.net; system DNS unchanged)"
 log_config "  Binary arguments: ${GREEN}$komari_args${NC}"
 if [ -n "$install_version" ]; then
     log_config "  Specified agent version: ${GREEN}$install_version${NC}"
@@ -233,8 +253,7 @@ uninstall_previous() {
     fi
 }
 
-# Uninstall previous installation
-uninstall_previous
+# The old installation is stopped only after a new binary is downloaded.
 
 install_dependencies() {
     log_step "Checking and installing dependencies..."
@@ -373,28 +392,38 @@ else
     log_step "Downloading $file_name directly..."
     log_info "URL: ${CYAN}$download_url${NC}"
 fi
-if command -v curl >/dev/null 2>&1; then
-    download_ok=false
-    if curl -L -o "$komari_agent_path" "$download_url"; then
-        download_ok=true
+komari_download_tmp=$(mktemp "$target_dir/.agent-download.XXXXXX") || exit 1
+dns64_helper=""
+trap 'rm -f "$komari_download_tmp"; [ -z "$dns64_helper" ] || rm -f "$dns64_helper"' EXIT
+download_ok=false
+if command -v curl >/dev/null 2>&1 && curl -fL --connect-timeout 10 --max-time 120 -o "$komari_download_tmp" "$download_url"; then
+    download_ok=true
+elif command -v wget >/dev/null 2>&1 && wget --timeout=30 --tries=2 -qO "$komari_download_tmp" "$download_url"; then
+    download_ok=true
+fi
+if [ "$download_ok" = false ] && [ -n "$install_dns64" ]; then
+    log_info "Direct download failed; trying DNS64/NAT64 with TLS verification."
+    if command -v python3 >/dev/null 2>&1; then
+        dns64_helper=$(mktemp "$target_dir/.dns64-helper.XXXXXX") || exit 1
+        dns64_helper_url="https://raw.githubusercontent.com/zv201413/komari-agent_new/main/nat64-download.py"
+        if { command -v curl >/dev/null 2>&1 && curl -fsSL --connect-timeout 10 --max-time 30 "$dns64_helper_url" -o "$dns64_helper"; } ||
+           { command -v wget >/dev/null 2>&1 && wget --timeout=15 --tries=2 -qO "$dns64_helper" "$dns64_helper_url"; }; then
+            if python3 "$dns64_helper" --dns "$install_dns64" --url "$download_url" --output "$komari_download_tmp"; then
+                download_ok=true
+            fi
+        fi
+    else
+        log_warning "DNS64 download fallback requires Python 3.8+; install python3 or upload the binary manually."
     fi
-    if [ "$download_ok" = false ]; then
-        log_error "Download failed via curl"
-        exit 1
-    fi
-elif command -v wget >/dev/null 2>&1; then
-    download_ok=false
-    if wget -qO "$komari_agent_path" "$download_url"; then
-        download_ok=true
-    fi
-    if [ "$download_ok" = false ]; then
-        log_error "Download failed via wget"
-        exit 1
-    fi
-else
-    log_error "No download tool available (curl or wget)"
+fi
+if [ "$download_ok" = false ] || [ ! -s "$komari_download_tmp" ]; then
+    log_error "Download failed; the previous installation has been preserved."
     exit 1
 fi
+chmod +x "$komari_download_tmp" || exit 1
+"$komari_download_tmp" --help >/dev/null || { log_error "Downloaded agent cannot execute; previous installation preserved."; exit 1; }
+uninstall_previous
+mv "$komari_download_tmp" "$komari_agent_path" || exit 1
 
 # Set executable permissions
 chmod +x "$komari_agent_path"
