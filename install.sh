@@ -41,10 +41,21 @@ target_dir="/opt/komari"
 github_proxy=""
 install_dns64="2a00:1098:2c::1"
 agent_custom_dns_seen=false
+agent_fallback_dns_seen=false
+install_action="install"
+# A trailing action is installer syntax, never an argument to the agent.
+if [ "$#" -gt 0 ]; then
+    case "${!#}" in
+        rep|del|status)
+            install_action="${!#}"
+            set -- "${@:1:$(($# - 1))}"
+            ;;
+    esac
+fi
 install_version="" # New parameter for specifying version
 run_in_background=""  # Force nohup mode even if init system available
 install_dir_specified=false
-service_user="${SUDO_USER:-$(id -un)}"
+service_user="${SUDO_USER:-$(id -un 2>/dev/null || id -u)}"
 user_service=false
  
 
@@ -89,6 +100,11 @@ while [[ $# -gt 0 ]]; do
             komari_args="$komari_args --custom-dns $2"
             shift 2
             ;;
+        --fallback-dns)
+            agent_fallback_dns_seen=true
+            komari_args="$komari_args --fallback-dns $2"
+            shift 2
+            ;;
         --install-dir)
             target_dir="$2"
             install_dir_specified=true
@@ -126,9 +142,12 @@ case "$install_dns64" in
     off|0|false) install_dns64="" ;;
     *[!0-9a-fA-F:.]*) log_error "--install-dns64 expects a DNS server IP or off"; exit 1 ;;
 esac
-if [ -n "$install_dns64" ] && [ "$agent_custom_dns_seen" = false ]; then
-    komari_args="$komari_args --custom-dns $install_dns64"
+if [ -n "$install_dns64" ] && [ "$agent_custom_dns_seen" = false ] && [ "$agent_fallback_dns_seen" = false ]; then
+    komari_args="$komari_args --fallback-dns $install_dns64"
 fi
+case "$service_name" in
+    ""|.*|*[!a-zA-Z0-9_.-]*) log_error "Invalid service name"; exit 1 ;;
+esac
 
 # Remove leading space from komari_args if present
 komari_args="${komari_args# }"
@@ -159,6 +178,84 @@ fi
 komari_agent_path="${target_dir}/agent"
 nohup_log="${target_dir}/agent.log"
 
+# Check the executable as well as the PID; a stale PID must not target another app.
+is_agent_pid() {
+    case "$1" in ""|*[!0-9]*) return 1 ;; esac
+    kill -0 "$1" 2>/dev/null || return 1
+    if [ -d /proc ]; then
+        local executable expected
+        executable=$(readlink "/proc/$1/exe" 2>/dev/null) || return 1
+        expected=$(readlink -f "$komari_agent_path" 2>/dev/null || echo "$komari_agent_path")
+        [ "$executable" = "$expected" ] || [ "$executable" = "$expected (deleted)" ]
+    else
+        local command
+        command=$(ps -p "$1" -o args= 2>/dev/null)
+        case "$command" in "$komari_agent_path"|"$komari_agent_path "*) return 0 ;; *) return 1 ;; esac
+    fi
+}
+
+stop_background_agent() {
+    local pid attempt pids="" executable expected entry
+    if [ -f "$pid_file" ]; then
+        pid=$(cat "$pid_file")
+        if is_agent_pid "$pid"; then pids="$pid"; fi
+    fi
+    # Older installers could leave overwritten (deleted) executables running.
+    if [ -d /proc ]; then
+        expected=$(readlink -f "$komari_agent_path" 2>/dev/null || echo "$komari_agent_path")
+        for entry in /proc/[0-9]*/exe; do
+            executable=$(readlink "$entry" 2>/dev/null) || continue
+            if [ "$executable" = "$expected" ] || [ "$executable" = "$expected (deleted)" ]; then
+                pid=${entry%/exe}
+                pid=${pid##*/}
+                case " $pids " in *" $pid "*) ;; *) pids="$pids $pid" ;; esac
+            fi
+        done
+    fi
+    for pid in $pids; do
+        if is_agent_pid "$pid"; then
+            log_info "Stopping background agent (PID: $pid)..."
+            kill "$pid" 2>/dev/null || return 1
+            for attempt in 1 2 3; do
+                is_agent_pid "$pid" || break
+                sleep 1
+            done
+            if is_agent_pid "$pid"; then kill -KILL "$pid" 2>/dev/null || return 1; fi
+        fi
+    done
+    rm -f "$pid_file"
+}
+
+show_installation_status() {
+    local user_unit="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/${service_name}.service"
+    if [ "$EUID" -ne 0 ] && [ -f "$user_unit" ] && command -v systemctl >/dev/null 2>&1; then
+        systemctl --user status --no-pager "$service_name.service"
+    elif [ "$EUID" -eq 0 ] && [ -f "/etc/systemd/system/$service_name.service" ] && command -v systemctl >/dev/null 2>&1; then
+        systemctl status --no-pager "$service_name.service"
+    elif [ "$EUID" -eq 0 ] && [ -f "/etc/init.d/$service_name" ]; then
+        "/etc/init.d/$service_name" status
+    elif [ "$EUID" -eq 0 ] && [ -f "/etc/init/$service_name.conf" ] && command -v initctl >/dev/null 2>&1; then
+        initctl status "$service_name"
+    elif command -v supervisorctl >/dev/null 2>&1 && { [ -f "/etc/supervisor/conf.d/$service_name.conf" ] || [ -f "/etc/supervisord.d/$service_name.ini" ]; }; then
+        supervisorctl status "$service_name"
+    elif [ "$os_name" = darwin ] && command -v launchctl >/dev/null 2>&1 && { [ -f "$HOME/Library/LaunchAgents/com.komari.$service_name.plist" ] || [ -f "/Library/LaunchDaemons/com.komari.$service_name.plist" ]; }; then
+        launchctl list "com.komari.$service_name"
+    elif [ -f "$pid_file" ] && is_agent_pid "$(cat "$pid_file")"; then
+        log_success "$service_name is running (PID: $(cat "$pid_file"))"
+    elif [ -f "$komari_agent_path" ]; then
+        log_info "$service_name is installed but not running"
+        return 3
+    else
+        log_info "$service_name is not installed in $target_dir"
+        return 3
+    fi
+}
+
+if [ "$install_action" = status ]; then
+    show_installation_status
+    exit $?
+fi
+
 # User services are the preferred service type for a non-root Linux installation.
 # Without a systemd user session we fall back to background (nohup) mode instead.
 if [ "$EUID" -ne 0 ] && [ "$os_name" = "linux" ]; then
@@ -169,6 +266,7 @@ if [ "$EUID" -ne 0 ] && [ "$os_name" = "linux" ]; then
     fi
 fi
 
+if [ "$install_action" != del ]; then
 echo -e "${WHITE}===========================================${NC}"
 echo -e "${WHITE}    Komari Agent Installation Script     ${NC}"
 echo -e "${WHITE}===========================================${NC}"
@@ -186,6 +284,7 @@ else
     log_config "  Agent version: ${GREEN}Latest${NC}"
 fi
 echo ""
+fi
 
 # Function to uninstall the previous installation
 uninstall_previous() {
@@ -193,30 +292,30 @@ uninstall_previous() {
     
     # Stop and disable service if it exists
     if [ "$user_service" = true ]; then
-        if systemctl --user list-unit-files | grep -q "${service_name}.service"; then
+        if systemctl --user list-unit-files | grep -Fq "${service_name}.service"; then
             log_info "Stopping and disabling existing systemd user service..."
             systemctl --user stop "${service_name}.service" || true
             systemctl --user disable "${service_name}.service" || true
             rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/${service_name}.service"
             systemctl --user daemon-reload
         fi
-    elif command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files | grep -q "${service_name}.service"; then
+    elif [ "$EUID" -eq 0 ] && command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files | grep -Fq "${service_name}.service"; then
         log_info "Stopping and disabling existing systemd service..."
         systemctl stop ${service_name}.service
         systemctl disable ${service_name}.service
         rm -f "/etc/systemd/system/${service_name}.service"
         systemctl daemon-reload
-    elif command -v rc-service >/dev/null 2>&1 && [ -f "/etc/init.d/${service_name}" ]; then
+    elif [ "$EUID" -eq 0 ] && command -v rc-service >/dev/null 2>&1 && [ -f "/etc/init.d/${service_name}" ]; then
         log_info "Stopping and disabling existing OpenRC service..."
         rc-service ${service_name} stop
         rc-update del ${service_name} default
         rm -f "/etc/init.d/${service_name}"
-    elif command -v uci >/dev/null 2>&1 && [ -f "/etc/init.d/${service_name}" ]; then
+    elif [ "$EUID" -eq 0 ] && command -v uci >/dev/null 2>&1 && [ -f "/etc/init.d/${service_name}" ]; then
         log_info "Stopping and disabling existing procd service..."
         /etc/init.d/${service_name} stop
         /etc/init.d/${service_name} disable
         rm -f "/etc/init.d/${service_name}"
-    elif command -v initctl >/dev/null 2>&1 && [ -f "/etc/init/${service_name}.conf" ]; then
+    elif [ "$EUID" -eq 0 ] && command -v initctl >/dev/null 2>&1 && [ -f "/etc/init/${service_name}.conf" ]; then
         log_info "Stopping and removing existing upstart service..."
         initctl stop ${service_name}
         rm -f "/etc/init/${service_name}.conf"
@@ -238,7 +337,7 @@ uninstall_previous() {
         fi
     fi
 
-    if command -v supervisorctl >/dev/null 2>&1; then
+    if [ "$EUID" -eq 0 ] && command -v supervisorctl >/dev/null 2>&1; then
         supervisorctl stop ${service_name} >/dev/null 2>&1 || true
         supervisorctl remove ${service_name} >/dev/null 2>&1 || true
         rm -f /etc/supervisor/conf.d/${service_name}.conf 2>/dev/null || true
@@ -246,12 +345,28 @@ uninstall_previous() {
     fi
     
 
+    stop_background_agent || return 1
+    # Also remove an inactive user unit when no user bus is currently available.
+    if [ "$EUID" -ne 0 ]; then
+        rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/${service_name}.service"
+    fi
     # Remove old binary if it exists
     if [ -f "$komari_agent_path" ]; then
         log_info "Removing old binary..."
         rm -f "$komari_agent_path"
     fi
 }
+
+if [ "$install_action" = del ]; then
+    uninstall_previous || exit 1
+    rm -f "$target_dir/agent.sh" "$target_dir/$service_name.sh" "$nohup_log" "$target_dir/$service_name.pid"
+    rmdir "$target_dir" 2>/dev/null || true
+    log_success "$service_name uninstalled (unrelated files and saved data preserved)"
+    exit 0
+fi
+if [ "$install_action" = rep ]; then
+    log_info "Replacement requested; existing agent is preserved until the new binary is verified."
+fi
 
 # The old installation is stopped only after a new binary is downloaded.
 
@@ -422,7 +537,7 @@ if [ "$download_ok" = false ] || [ ! -s "$komari_download_tmp" ]; then
 fi
 chmod +x "$komari_download_tmp" || exit 1
 "$komari_download_tmp" --help >/dev/null || { log_error "Downloaded agent cannot execute; previous installation preserved."; exit 1; }
-uninstall_previous
+uninstall_previous || exit 1
 mv "$komari_download_tmp" "$komari_agent_path" || exit 1
 
 # Set executable permissions

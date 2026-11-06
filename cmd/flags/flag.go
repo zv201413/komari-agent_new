@@ -19,6 +19,7 @@ type Config struct {
 	MemoryIncludeCache  bool    `json:"memory_include_cache" env:"AGENT_MEMORY_INCLUDE_CACHE"`     // 包括缓存/缓冲区的内存使用情况
 	MemoryReportRawUsed bool    `json:"memory_report_raw_used" env:"AGENT_MEMORY_REPORT_RAW_USED"` // 使用原始内存使用情况报告
 	CustomDNS           string  `json:"custom_dns" env:"AGENT_CUSTOM_DNS"`                         // 使用的自定义DNS服务器
+	FallbackDNS         string  `json:"fallback_dns" env:"AGENT_FALLBACK_DNS"`                     // 系统解析或连接失败后的备用 DNS
 	EnableGPU           bool    `json:"enable_gpu" env:"AGENT_ENABLE_GPU"`                         // 启用详细GPU监控
 	ShowWarning         bool    `json:"show_warning" env:"AGENT_SHOW_WARNING"`                     // Windows 上显示安全警告，作为子进程运行一次
 	CheckNatType        bool    `json:"check_nat_type" env:"AGENT_CHECK_NAT_TYPE"`                 // 检查 NAT 类型

@@ -3,8 +3,6 @@ package dnsresolver
 import (
 	"context"
 	"crypto/tls"
-	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -16,20 +14,6 @@ import (
 
 var flags = pkg_flags.GlobalConfig
 var (
-	DNSServers = []string{
-		"[2606:4700:4700::1111]:53", // Cloudflare IPv6
-		"[2606:4700:4700::1001]:53", // Cloudflare IPv6 备用
-		"[2001:4860:4860::8888]:53", // Google IPv6
-		"[2001:4860:4860::8844]:53", // Google IPv6 备用
-
-		"114.114.114.114:53", // 114DNS，中国大陆
-		"1.1.1.1:53",         // Cloudflare IPv4
-		"8.8.8.8:53",         // Google IPv4
-		"8.8.4.4:53",         // Google IPv4 备用
-		"223.5.5.5:53",       // 阿里DNS，中国大陆
-		"119.29.29.29:53",    // DNSPod，中国大陆
-	}
-
 	// CustomDNSServer 自定义DNS服务器，可以通过命令行参数设置
 	CustomDNSServer string
 
@@ -43,11 +27,14 @@ type httpClientKey struct {
 	timeout          time.Duration
 	ignoreUnsafeCert bool
 	preferIPVersion  string
+	customDNS        string
+	fallbackDNS      string
 }
 
 // SetCustomDNSServer 设置自定义DNS服务器
 func SetCustomDNSServer(dnsServer string) {
 	if dnsServer == "" {
+		CustomDNSServer = ""
 		return
 	}
 	CustomDNSServer = normalizeDNSServer(dnsServer)
@@ -73,51 +60,10 @@ func normalizeDNSServer(s string) string {
 	return s
 }
 
-// getCurrentDNSServer 获取当前要使用的DNS服务器
-func getCurrentDNSServer() string {
-	if CustomDNSServer != "" {
-		return CustomDNSServer
-	}
-	// 如果没有设置自定义DNS，返回空字符串，表示应使用系统默认解析器
-	return ""
-}
-
-// GetCustomResolver 返回一个解析器：
-// - 若设置了自定义 DNS：使用该服务器（并在失败时尝试内置列表作为兜底）。
-// - 若未设置自定义 DNS：返回系统默认解析器（不使用内置列表）。
+// GetCustomResolver returns the primary resolver. Network connections use the
+// complete lookup/connection fallback chain through GetDialContext instead.
 func GetCustomResolver() *net.Resolver {
-	// 未设置自定义 DNS，直接使用系统默认解析器
-	if getCurrentDNSServer() == "" {
-		return net.DefaultResolver
-	}
-
-	// 设置了自定义 DNS，则构造使用自定义 DNS 的解析器
-	return &net.Resolver{
-		PreferGo: true,
-		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			d := net.Dialer{Timeout: 10 * time.Second}
-
-			// 优先使用自定义 DNS 服务器
-			dnsServer := getCurrentDNSServer()
-			if dnsServer != "" {
-				if conn, err := d.DialContext(ctx, "udp", dnsServer); err == nil {
-					return conn, nil
-				}
-			}
-			log.Printf("Custom DNS server %s is unreachable, trying fallback servers", dnsServer)
-			// 如果自定义DNS不可用，则尝试内置列表作为兜底
-			for _, server := range DNSServers {
-				if server == dnsServer {
-					continue
-				}
-				if conn, err := d.DialContext(ctx, "udp", server); err == nil {
-					return conn, nil
-				}
-			}
-
-			return nil, fmt.Errorf("no available DNS server")
-		},
-	}
+	return resolverSources()[0].resolver
 }
 
 // buildTransport 构建带有自定义解析/拨号策略的 HTTP 传输层，可注入 TLS 配置
@@ -129,32 +75,9 @@ func buildTransportWithPreference(timeout time.Duration, tlsConfig *tls.Config, 
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	customResolver := GetCustomResolver()
 	return &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			host, port, err := net.SplitHostPort(addr)
-			if err != nil {
-				return nil, err
-			}
-			ips, err := customResolver.LookupHost(ctx, host)
-			if err != nil {
-				return nil, err
-			}
-			sortIPsByPreference(ips, preferIPVersion)
-			for _, ip := range ips {
-				dialer := &net.Dialer{
-					Timeout:   timeout,
-					KeepAlive: 30 * time.Second,
-					DualStack: true,
-				}
-				conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip, port))
-				if err == nil {
-					return conn, nil
-				}
-			}
-			return nil, fmt.Errorf("failed to dial to any of the resolved IPs")
-		},
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           GetDialContextWithPreference(timeout, preferIPVersion),
 		MaxIdleConns:          32,
 		MaxIdleConnsPerHost:   4,
 		MaxConnsPerHost:       8,
@@ -180,7 +103,7 @@ func getHTTPClient(timeout time.Duration, preferIPVersion string) *http.Client {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	key := httpClientKey{timeout: timeout, ignoreUnsafeCert: flags.IgnoreUnsafeCert, preferIPVersion: preferIPVersion}
+	key := httpClientKey{timeout: timeout, ignoreUnsafeCert: flags.IgnoreUnsafeCert, preferIPVersion: preferIPVersion, customDNS: CustomDNSServer, fallbackDNS: FallbackDNSServer}
 	httpClientMu.Lock()
 	defer httpClientMu.Unlock()
 	if client := httpClients[key]; client != nil {
@@ -196,17 +119,24 @@ func getHTTPClient(timeout time.Duration, preferIPVersion string) *http.Client {
 	return client
 }
 
-// GetNetDialer 返回一个使用自定义DNS解析器的网络拨号器
-func GetNetDialer(timeout time.Duration) *net.Dialer {
+// NetworkDialer shares the same DNS fallback path as HTTP and WebSocket.
+type NetworkDialer struct {
+	dialContext func(context.Context, string, string) (net.Conn, error)
+}
+
+func (d *NetworkDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	return d.dialContext(ctx, network, address)
+}
+
+func (d *NetworkDialer) Dial(network, address string) (net.Conn, error) {
+	return d.DialContext(context.Background(), network, address)
+}
+
+func GetNetDialer(timeout time.Duration) *NetworkDialer {
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
-
-	return &net.Dialer{
-		Timeout:   timeout,
-		KeepAlive: 30 * time.Second,
-		Resolver:  GetCustomResolver(),
-	}
+	return &NetworkDialer{dialContext: GetDialContext(timeout)}
 }
 
 // GetDialContext 返回一个自定义 DialContext：
@@ -224,40 +154,7 @@ func GetDialContextWithPreference(timeout time.Duration, preferIPVersion string)
 		timeout = 15 * time.Second
 	}
 
-	resolver := GetCustomResolver()
-	preferIPVersion = normalizeIPVersionPreference(preferIPVersion)
-
-	return func(ctx context.Context, network, addr string) (net.Conn, error) {
-		host, port, err := net.SplitHostPort(addr)
-		if err != nil {
-			return nil, err
-		}
-
-		// 为解析设置一个带超时的子 context，避免整体拨号过快超时
-		lookupCtx, cancel := context.WithTimeout(ctx, timeout)
-		defer cancel()
-
-		ips, err := resolver.LookupHost(lookupCtx, host)
-		if err != nil {
-			return nil, err
-		}
-
-		sortIPsByPreference(ips, preferIPVersion)
-
-		// 逐个 IP 尝试连接
-		for _, ip := range ips {
-			d := &net.Dialer{
-				Timeout:   timeout,
-				KeepAlive: 30 * time.Second,
-				DualStack: true,
-			}
-			c, err := d.DialContext(ctx, network, net.JoinHostPort(ip, port))
-			if err == nil {
-				return c, nil
-			}
-		}
-		return nil, fmt.Errorf("failed to dial to any of the resolved IPs")
-	}
+	return newDialContext(timeout, normalizeIPVersionPreference(preferIPVersion), resolverSources(), resolverAttemptTimeout)
 }
 
 func normalizeIPVersionPreference(preferIPVersion string) string {

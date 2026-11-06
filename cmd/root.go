@@ -87,13 +87,21 @@ var RootCmd = &cobra.Command{
 		log.Println("Komari Agent", update.CurrentVersion)
 		log.Println("Github Repo:", update.Repo)
 
-		// 设置 DNS 解析行为
+		// Configure both paths before creating cached HTTP clients.
+		dnsresolver.SetFallbackDNSServer(flags.FallbackDNS)
 		if flags.CustomDNS != "" {
 			dnsresolver.SetCustomDNSServer(flags.CustomDNS)
-			log.Printf("Using custom DNS server: %s", flags.CustomDNS)
+			if flags.CustomDNS == dnsresolver.DefaultDNS64 {
+				log.Printf("Using system DNS first; legacy DNS64 argument is a fallback: %s", flags.CustomDNS)
+			} else {
+				log.Printf("Using custom DNS server: %s (system DNS fallback enabled)", flags.CustomDNS)
+			}
 		} else {
 			// 未设置则使用系统默认 DNS（不使用内置列表）
 			log.Printf("Using system default DNS resolver")
+		}
+		if flags.FallbackDNS != "" {
+			log.Printf("DNS fallback server: %s", flags.FallbackDNS)
 		}
 
 		// Auto discovery
@@ -179,6 +187,7 @@ func init() {
 	RootCmd.PersistentFlags().BoolVar(&flags.MemoryIncludeCache, "memory-include-cache", false, "Include cache/buffer in memory usage")
 	RootCmd.PersistentFlags().BoolVar(&flags.MemoryReportRawUsed, "memory-exclude-bcf", false, "Use \"raminfo.Used = v.Total - v.Free - v.Buffers - v.Cached\" calculation for memory usage")
 	RootCmd.PersistentFlags().StringVar(&flags.CustomDNS, "custom-dns", "", "Custom DNS server to use (e.g. 8.8.8.8, 114.114.114.114). By default, the program uses the system DNS resolver.")
+	RootCmd.PersistentFlags().StringVar(&flags.FallbackDNS, "fallback-dns", "", "DNS server to try only after primary DNS resolution or connection fails (e.g. 2a00:1098:2c::1 for DNS64/NAT64).")
 	RootCmd.PersistentFlags().BoolVar(&flags.EnableGPU, "gpu", false, "Enable detailed GPU monitoring (usage, memory, multi-GPU support)")
 	RootCmd.PersistentFlags().BoolVar(&flags.ShowWarning, "show-warning", false, "Show security warning on Windows, run once as a subprocess")
 	RootCmd.PersistentFlags().BoolVar(&flags.CheckNatType, "check-nat-type", false, "Test NAT type")
